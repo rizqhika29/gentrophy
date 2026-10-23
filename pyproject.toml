@@ -1,0 +1,9 @@
+[project]
+name = "gentrophy"
+version = "0.1.0"
+description = "GenTrophy — trustless AI-judged bounty review and payout on GenLayer"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/direct"]
+addopts = "-v"
