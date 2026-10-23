@@ -10,6 +10,7 @@ artifacts/
 # Node
 node_modules/
 dist/
+*.tsbuildinfo
 
 # Logs / OS
 *.log
