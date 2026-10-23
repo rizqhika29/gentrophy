@@ -2,7 +2,6 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -53,12 +52,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [chainId, setChainId] = useState<number | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [provider, setProvider] = useState<Eip1193Provider | null>(null);
-  const [wallets, setWallets] = useState<WalletOption[]>([]);
+  const [wallets] = useState<WalletOption[]>(() => listWalletProviders());
   const unsubRef = useRef<(() => void) | null>(null);
-
-  useEffect(() => {
-    setWallets(listWalletProviders());
-  }, []);
 
   const cleanup = useCallback(() => {
     unsubRef.current?.();

@@ -8,6 +8,7 @@ import {
   waitForDecision,
   waitForFinalization,
   writeContractAutoFee,
+  type TxHash,
 } from "@/lib/genlayer";
 import { extractErrorMessage } from "@/lib/utils";
 import type {
@@ -25,30 +26,36 @@ export function useStats() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const raw = (await readClient.readContract({
+  // Promise callbacks (not async/await) keep every setState behind an async
+  // boundary, so the mount effect never sets state synchronously.
+  const fetchAndSet = useCallback(() => {
+    readClient
+      .readContract({
         address: CONTRACT_ADDRESS,
         functionName: "get_stats",
         args: [],
-      })) as unknown as Stats;
-      setStats({
-        total_created: Number(raw.total_created ?? 0),
-        total_paid_wei: String(raw.total_paid_wei ?? "0"),
-        next_id: Number(raw.next_id ?? 0),
-      });
-    } catch (err) {
-      setError(extractErrorMessage(err));
-    } finally {
-      setLoading(false);
-    }
+      })
+      .then((raw: Stats) => {
+        setStats({
+          total_created: Number(raw.total_created ?? 0),
+          total_paid_wei: String(raw.total_paid_wei ?? "0"),
+          next_id: Number(raw.next_id ?? 0),
+        });
+        setError(null);
+      })
+      .catch((err: unknown) => setError(extractErrorMessage(err)))
+      .finally(() => setLoading(false));
   }, [readClient]);
 
+  const refresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    void fetchAndSet();
+  }, [fetchAndSet]);
+
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void fetchAndSet();
+  }, [fetchAndSet]);
 
   return { stats, loading, error, refresh };
 }
@@ -59,77 +66,83 @@ export function useOpenBounties() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const raw = (await readClient.readContract({
+  const fetchAndSet = useCallback(() => {
+    readClient
+      .readContract({
         address: CONTRACT_ADDRESS,
         functionName: "get_open_bounties",
         args: [],
-      })) as unknown as OpenBounty[];
-      setBounties(
-        (raw ?? []).map((b) => ({
-          ...b,
-          bounty_id: Number(b.bounty_id),
-          min_score: Number(b.min_score),
-          reward_wei: String(b.reward_wei),
-          deadline: Number(b.deadline),
-        })),
-      );
-    } catch (err) {
-      setError(extractErrorMessage(err));
-    } finally {
-      setLoading(false);
-    }
+      })
+      .then((raw: OpenBounty[]) => {
+        setBounties(
+          (raw ?? []).map((b) => ({
+            ...b,
+            bounty_id: Number(b.bounty_id),
+            min_score: Number(b.min_score),
+            reward_wei: String(b.reward_wei),
+            deadline: Number(b.deadline),
+          })),
+        );
+        setError(null);
+      })
+      .catch((err: unknown) => setError(extractErrorMessage(err)))
+      .finally(() => setLoading(false));
   }, [readClient]);
 
+  const refresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    void fetchAndSet();
+  }, [fetchAndSet]);
+
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void fetchAndSet();
+  }, [fetchAndSet]);
 
   return { bounties, loading, error, refresh };
 }
 
 export function useBounty(bountyId: number | null) {
   const { readClient } = useWallet();
-  const [bounty, setBounty] = useState<Bounty | null>(null);
+  const [fetched, setFetched] = useState<Bounty | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    if (bountyId == null) {
-      setBounty(null);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const raw = (await readClient.readContract({
+  const fetchAndSet = useCallback(() => {
+    if (bountyId == null) return;
+    readClient
+      .readContract({
         address: CONTRACT_ADDRESS,
         functionName: "get_bounty",
         args: [BigInt(bountyId)],
-      })) as unknown as Bounty;
-      setBounty({
-        ...raw,
-        bounty_id: Number(raw.bounty_id),
-        min_score: Number(raw.min_score),
-        reward_wei: String(raw.reward_wei),
-        deadline: Number(raw.deadline),
-        score: Number(raw.score),
-      });
-    } catch (err) {
-      setError(extractErrorMessage(err));
-    } finally {
-      setLoading(false);
-    }
+      })
+      .then((raw: Bounty) => {
+        setFetched({
+          ...raw,
+          bounty_id: Number(raw.bounty_id),
+          min_score: Number(raw.min_score),
+          reward_wei: String(raw.reward_wei),
+          deadline: Number(raw.deadline),
+          score: Number(raw.score),
+        });
+        setError(null);
+      })
+      .catch((err: unknown) => setError(extractErrorMessage(err)))
+      .finally(() => setLoading(false));
   }, [readClient, bountyId]);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  const refresh = useCallback(() => {
+    if (bountyId == null) return;
+    setLoading(true);
+    setError(null);
+    void fetchAndSet();
+  }, [fetchAndSet, bountyId]);
 
-  return { bounty, loading, error, refresh };
+  useEffect(() => {
+    void fetchAndSet();
+  }, [fetchAndSet]);
+
+  return { bounty: bountyId == null ? null : fetched, loading, error, refresh };
 }
 
 export interface TxProgress {
@@ -185,7 +198,7 @@ export function useTxRunner() {
       }
 
       lockRef.current = true;
-      let txHash: `0x${string}` | undefined;
+      let txHash: TxHash | undefined;
       try {
         setProgress({ phase: "estimating", message: "Preparing transaction…" });
         if (provider) await ensureWalletOnNetwork(provider);
