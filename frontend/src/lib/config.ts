@@ -8,7 +8,7 @@ export const NETWORK = (import.meta.env.VITE_NETWORK || "studionet") as
   | "testnetAsimov";
 
 export const CHAIN_ID_DEC = 61999;
-export const CHAIN_ID_HEX = "0xf23cf";
+export const CHAIN_ID_HEX = "0xf22f";
 export const EXPLORER_TX = (hash: string) =>
   `https://genlayer-explorer.vercel.app/tx/${hash}`;
 export const FAUCET_URL = "https://studio.genlayer.com/faucet";
