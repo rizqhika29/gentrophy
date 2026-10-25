@@ -3,6 +3,8 @@
  * Never hijacks window.ethereum; never requests accounts on an unselected provider.
  */
 
+import { CHAIN_ID_HEX } from "./config";
+
 export interface Eip1193Provider {
   request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
   isMetaMask?: boolean;
@@ -70,7 +72,7 @@ export async function getChainId(provider: Eip1193Provider): Promise<number> {
 }
 
 export async function switchToStudionet(provider: Eip1193Provider): Promise<void> {
-  const chainIdHex = "0xf22f";
+  const chainIdHex = CHAIN_ID_HEX;
   try {
     await provider.request({
       method: "wallet_switchEthereumChain",

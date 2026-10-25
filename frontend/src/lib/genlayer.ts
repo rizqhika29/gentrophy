@@ -6,8 +6,9 @@ import {
   ExecutionResult,
   isDecidedState,
 } from "genlayer-js/types";
-import type { Eip1193Provider } from "./wallet";
-import { NETWORK } from "./config";
+import { switchToStudionet, type Eip1193Provider } from "./wallet";
+import { CHAIN_ID_DEC, NETWORK } from "./config";
+import { extractErrorMessage } from "./utils";
 import type { ConsensusSummary } from "./types";
 
 export { TransactionStatus, TransactionResult, ExecutionResult, isDecidedState };
@@ -45,13 +46,21 @@ export function createWriteClient(
   });
 }
 
+/**
+ * Make sure the wallet is on Studionet before a write.
+ *
+ * Deliberately does NOT use genlayer-js `client.connect()`: that helper probes
+ * MetaMask Snap APIs (`wallet_getSnaps` / `wallet_requestSnaps`) and mutates
+ * `window.ethereum` directly. Wallets without Snap support (Rabby, Coinbase,
+ * Brave…) reject it with -32601, and MetaMask pops an "install GenLayer snap"
+ * dialog the user can decline — either way the write dies in `useTxRunner`
+ * before a transaction is ever created, so every call looks like a failure.
+ * A chain switch only needs `eth_chainId` + `wallet_switchEthereumChain`.
+ */
 export async function ensureWalletOnNetwork(provider: Eip1193Provider): Promise<void> {
-  const client = createClient({
-    chain: getChain(),
-    account: "0x0000000000000000000000000000000000000001" as `0x${string}`,
-    provider: provider as never,
-  });
-  await client.connect(NETWORK);
+  const hex = (await provider.request({ method: "eth_chainId" })) as string;
+  if (Number.parseInt(hex, 16) === CHAIN_ID_DEC) return;
+  await switchToStudionet(provider);
 }
 
 interface ReceiptLike {
@@ -97,6 +106,10 @@ export function isSuccessTx(tx: unknown): boolean {
   const r = tx as ReceiptLike | null;
   if (!r) return false;
   const status = r.statusName ?? r.status_name ?? String(r.status ?? "");
+  // Fail closed: anything that is not explicitly ACCEPTED/FINALIZED is a
+  // failure. `isDecidedState` only matches the numeric form ("5"), so for a
+  // named receipt (PENDING, UNDETERMINED, CANCELED, LEADER_TIMEOUT…) it is
+  // false — deliberate, those are never a success.
   const decidedOk =
     status === "ACCEPTED" || status === "FINALIZED" || isDecidedState(status);
   const exec = r.txExecutionResultName ?? leaderReceipt(r)?.execution_result;
@@ -137,20 +150,80 @@ export function txStatusName(tx: unknown): string {
   return [status, exec].filter(Boolean).join(" / ");
 }
 
+/**
+ * SDK default is 10 retries x 3s = 30s, which is shorter than a real Studionet
+ * decision under load (LLM-backed writes, appeals, validators warming up). A
+ * timeout there surfaces as "execution failed" even though the transaction is
+ * still on its way to ACCEPTED — the failure mode users read as "the button is
+ * broken". 100 x 3s = 5 min, while the UI keeps showing the tx link.
+ */
+const DECISION_RETRIES = 100;
+const DECISION_INTERVAL_MS = 3_000;
+
+/**
+ * Observed ACCEPTED → FINALIZED on Studionet: ~34s (SDK default 10 x 3s = 30s
+ * timed out by ~4s, so the "Finalized" state was effectively unreachable).
+ * 40 x 5s = 200s covers it and keeps polling well under the 60 req/min limit.
+ */
+const FINALIZATION_RETRIES = 40;
+const FINALIZATION_INTERVAL_MS = 5_000;
+
+/** Studionet allows 60 req/min/IP; the SDK transport has retryCount: 0. */
+const RATE_LIMIT_ATTEMPTS = 2;
+const RATE_LIMIT_BACKOFF_MS = 15_000;
+
+function isRateLimited(err: unknown): boolean {
+  const e = err as { code?: unknown; status?: unknown } | null;
+  if (e && (e.code === 429 || e.status === 429 || e.code === -32005)) return true;
+  return /429|rate ?limit|too many requests|retry-after|quota exceeded/i.test(
+    extractErrorMessage(err),
+  );
+}
+
+/**
+ * A 429 mid-poll would otherwise surface to the user as a failed transaction.
+ * Only transient rate-limit errors are retried (never SDK timeouts — those
+ * already exhausted their own retry budget with a precise message).
+ */
+async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= RATE_LIMIT_ATTEMPTS || !isRateLimited(err)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_BACKOFF_MS));
+    }
+  }
+}
+
 /** Wait until the tx is decided (ACCEPTED family), returning the receipt. */
 export async function waitForDecision(
   client: GLClient,
   hash: TxHash,
 ): Promise<unknown> {
-  return client.waitForTransactionReceipt({ hash, status: TransactionStatus.ACCEPTED });
+  return withRateLimitRetry(() =>
+    client.waitForTransactionReceipt({
+      hash,
+      status: TransactionStatus.ACCEPTED,
+      retries: DECISION_RETRIES,
+      interval: DECISION_INTERVAL_MS,
+    }),
+  );
 }
 
-/** Wait until FINALIZED settlement. */
+/** Wait until FINALIZED settlement (background — failures are non-fatal). */
 export async function waitForFinalization(
   client: GLClient,
   hash: TxHash,
 ): Promise<unknown> {
-  return client.waitForTransactionReceipt({ hash, status: TransactionStatus.FINALIZED });
+  return withRateLimitRetry(() =>
+    client.waitForTransactionReceipt({
+      hash,
+      status: TransactionStatus.FINALIZED,
+      retries: FINALIZATION_RETRIES,
+      interval: FINALIZATION_INTERVAL_MS,
+    }),
+  );
 }
 
 export type WriteCall = {

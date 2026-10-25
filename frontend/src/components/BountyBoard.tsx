@@ -78,7 +78,8 @@ export function BountyBoard({
                 </div>
                 <p className="mt-2 font-semibold text-foreground">{b.title}</p>
                 <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                  {b.rubric.slice(0, 140)}
+                  {/* contract stores the rubric truncated at [:120] */}
+                  {b.rubric.slice(0, 120)}
                   {b.rubric.length > 140 ? "…" : ""}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">

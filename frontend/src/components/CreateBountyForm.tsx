@@ -5,6 +5,8 @@ import { Input, Label, Textarea, Card, CardContent } from "@/components/ui/primi
 import { useTxRunner } from "@/hooks/useContract";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/components/ui/toast";
+import { TxProgress } from "@/components/TxProgress";
+import { validateDeadline } from "@/lib/rules";
 import { parseGenToWei } from "@/lib/utils";
 import type { TaskType } from "@/lib/types";
 
@@ -12,7 +14,7 @@ const DEADLINE_DEFAULT = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
 
 export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
   const { address, wrongNetwork } = useWallet();
-  const { run, busy } = useTxRunner();
+  const { run, progress, busy } = useTxRunner();
   const toast = useToast();
 
   const [title, setTitle] = useState("");
@@ -30,7 +32,8 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
     if (rubric.length > 4000) return "Rubric max 4000 chars";
     const ms = Number(minScore);
     if (!Number.isFinite(ms) || ms < 0 || ms > 100) return "min_score must be 0–100";
-    if (!deadline || Number(deadline) <= 0) return "Deadline must be a unix timestamp > 0";
+    const deadlineErr = validateDeadline(deadline);
+    if (deadlineErr) return deadlineErr;
     try {
       const wei = parseGenToWei(reward);
       if (wei <= 0n) return "Reward must be > 0 GEN";
@@ -74,7 +77,7 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
       successTitle: "Bounty created",
     });
 
-    if (result?.ok) {
+    if (result.ok) {
       toast.update(toastId, {
         kind: "success",
         title: "Bounty created (ACCEPTED)",
@@ -88,7 +91,7 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
       toast.update(toastId, {
         kind: "error",
         title: "Create failed",
-        description: result && "error" in result ? result.error : "Unknown error",
+        description: result.error,
       });
     }
   };
@@ -108,7 +111,10 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
             <Input
               id="title"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setClientError(null);
+              }}
               placeholder="Write an article about GenLayer"
               maxLength={200}
               disabled={busy}
@@ -141,7 +147,10 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
             <Textarea
               id="rubric"
               value={rubric}
-              onChange={(e) => setRubric(e.target.value)}
+              onChange={(e) => {
+                setRubric(e.target.value);
+                setClientError(null);
+              }}
               placeholder="Article must explain X clearly, include a concrete example, and be at least 500 words…"
               rows={4}
               maxLength={4000}
@@ -158,7 +167,10 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
                 min={0}
                 max={100}
                 value={minScore}
-                onChange={(e) => setMinScore(e.target.value)}
+                onChange={(e) => {
+                  setMinScore(e.target.value);
+                  setClientError(null);
+                }}
                 disabled={busy}
               />
             </div>
@@ -167,7 +179,10 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
               <Input
                 id="reward"
                 value={reward}
-                onChange={(e) => setReward(e.target.value)}
+                onChange={(e) => {
+                  setReward(e.target.value);
+                  setClientError(null);
+                }}
                 placeholder="1"
                 disabled={busy}
               />
@@ -178,7 +193,10 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
                 id="deadline"
                 type="number"
                 value={deadline}
-                onChange={(e) => setDeadline(e.target.value)}
+                onChange={(e) => {
+                  setDeadline(e.target.value);
+                  setClientError(null);
+                }}
                 disabled={busy}
               />
             </div>
@@ -187,6 +205,7 @@ export function CreateBountyForm({ onCreated }: { onCreated: () => void }) {
           {clientError ? (
             <p className="text-xs text-destructive">{clientError}</p>
           ) : null}
+          <TxProgress progress={progress} />
           {!address ? (
             <p className="text-xs text-muted-foreground">Connect wallet to post a bounty.</p>
           ) : null}

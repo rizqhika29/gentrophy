@@ -104,37 +104,56 @@ export function useOpenBounties() {
 
 export function useBounty(bountyId: number | null) {
   const { readClient } = useWallet();
-  const [fetched, setFetched] = useState<Bounty | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The record is keyed by the id that produced it: a record for another id is
+  // simply treated as absent, so a stale bounty (and its status/actions) is
+  // never rendered under a new selection — without a setState-in-effect reset.
+  const [state, setState] = useState<{
+    id: number | null;
+    data: Bounty | null;
+    error: string | null;
+    done: boolean;
+  }>({ id: null, data: null, error: null, done: false });
+  const activeIdRef = useRef<number | null>(null);
 
   const fetchAndSet = useCallback(() => {
     if (bountyId == null) return;
+    const id = bountyId;
+    activeIdRef.current = id;
     readClient
       .readContract({
         address: CONTRACT_ADDRESS,
         functionName: "get_bounty",
-        args: [BigInt(bountyId)],
+        args: [BigInt(id)],
       })
       .then((raw: Bounty) => {
-        setFetched({
-          ...raw,
-          bounty_id: Number(raw.bounty_id),
-          min_score: Number(raw.min_score),
-          reward_wei: String(raw.reward_wei),
-          deadline: Number(raw.deadline),
-          score: Number(raw.score),
+        if (activeIdRef.current !== id) return; // superseded by another selection
+        setState({
+          id,
+          data: {
+            ...raw,
+            bounty_id: Number(raw.bounty_id),
+            min_score: Number(raw.min_score),
+            reward_wei: String(raw.reward_wei),
+            deadline: Number(raw.deadline),
+            score: Number(raw.score),
+          },
+          error: null,
+          done: true,
         });
-        setError(null);
       })
-      .catch((err: unknown) => setError(extractErrorMessage(err)))
-      .finally(() => setLoading(false));
+      .catch((err: unknown) => {
+        if (activeIdRef.current !== id) return;
+        setState({ id, data: null, error: extractErrorMessage(err), done: true });
+      });
   }, [readClient, bountyId]);
 
   const refresh = useCallback(() => {
     if (bountyId == null) return;
-    setLoading(true);
-    setError(null);
+    setState((prev) =>
+      prev.id === bountyId
+        ? { ...prev, error: null, done: false }
+        : { id: bountyId, data: null, error: null, done: false },
+    );
     void fetchAndSet();
   }, [fetchAndSet, bountyId]);
 
@@ -142,7 +161,13 @@ export function useBounty(bountyId: number | null) {
     void fetchAndSet();
   }, [fetchAndSet]);
 
-  return { bounty: bountyId == null ? null : fetched, loading, error, refresh };
+  const current = state.id === bountyId;
+  return {
+    bounty: bountyId == null || !current ? null : state.data,
+    loading: bountyId != null && !current ? true : bountyId != null && !state.done,
+    error: bountyId == null || !current ? null : state.error,
+    refresh,
+  };
 }
 
 export interface TxProgress {
@@ -161,16 +186,39 @@ const idleProgress: TxProgress = { phase: "idle" };
  * - single-flight lock (double-click safe)
  * - two-phase error model (pre-txId vs post-txId)
  * - decision tracking with consensus summary
+ *
+ * `run` ALWAYS resolves with a TxRunResult — never `undefined` — so callers can
+ * show the real reason instead of a generic "Unknown error".
  */
+export type TxRunResult =
+  | {
+      ok: true;
+      txHash: TxHash;
+      statusLine?: string;
+      consensus: ConsensusSummary | null;
+      message: string;
+    }
+  | {
+      ok: false;
+      phase: "pre-submit" | "post-submit";
+      error: string;
+      txHash?: TxHash;
+      statusLine?: string;
+      consensus?: ConsensusSummary | null;
+    };
+
 export function useTxRunner() {
   const { writeClient, wrongNetwork, address, provider } = useWallet();
   const [progress, setProgress] = useState<TxProgress>(idleProgress);
   const lockRef = useRef(false);
 
+  // "deciding" = decision already shown, and "finalized" = terminal success —
+  // neither may keep buttons disabled (a stuck phase used to freeze a panel).
   const busy =
     progress.phase !== "idle" &&
     progress.phase !== "error" &&
-    progress.phase !== "deciding";
+    progress.phase !== "deciding" &&
+    progress.phase !== "finalized";
 
   const run = useCallback(
     async (opts: {
@@ -180,21 +228,23 @@ export function useTxRunner() {
       successTitle: string;
       successDesc?: string;
       onDone?: () => void;
-    }) => {
-      if (lockRef.current) return;
+    }): Promise<TxRunResult> => {
+      if (lockRef.current) {
+        return {
+          ok: false as const,
+          phase: "pre-submit" as const,
+          error: "A transaction is already in flight — wait for it to finish.",
+        };
+      }
       if (!writeClient || !address) {
-        setProgress({
-          phase: "error",
-          message: "Connect your wallet first.",
-        });
-        return;
+        const message = "Connect your wallet first.";
+        setProgress({ phase: "error", message });
+        return { ok: false as const, phase: "pre-submit" as const, error: message };
       }
       if (wrongNetwork) {
-        setProgress({
-          phase: "error",
-          message: "Wrong network — switch to GenLayer Studionet (chain 61999).",
-        });
-        return;
+        const message = "Wrong network — switch to GenLayer Studionet (chain 61999).";
+        setProgress({ phase: "error", message });
+        return { ok: false as const, phase: "pre-submit" as const, error: message };
       }
 
       lockRef.current = true;
@@ -225,15 +275,27 @@ export function useTxRunner() {
         const ok = isSuccessTx(decided);
 
         if (!ok) {
+          // A contract guard / execution error. The on-chain reason lives in the
+          // leader receipt — surface it instead of a generic "Unknown error".
+          const reason = consensus?.leader_error
+            ? extractErrorMessage(consensus.leader_error)
+            : `Execution failed (${statusLine}). Check the receipt before retrying.`;
           setProgress({
             phase: "error",
             txHash,
             explorerUrl: EXPLORER_TX(txHash),
             statusLine,
             consensus,
-            message: `Execution failed (${statusLine}). Check the receipt before retrying.`,
+            message: reason,
           });
-          return;
+          return {
+            ok: false as const,
+            phase: "post-submit" as const,
+            error: reason,
+            txHash,
+            statusLine,
+            consensus,
+          };
         }
 
         setProgress({
@@ -281,7 +343,12 @@ export function useTxRunner() {
           explorerUrl: EXPLORER_TX(txHash),
           message: `${extractErrorMessage(err)} — tx ${txHash.slice(0, 10)}… was already submitted; tracking only.`,
         });
-        return { ok: false as const, phase: "post-submit" as const, error: extractErrorMessage(err) };
+        return {
+          ok: false as const,
+          phase: "post-submit" as const,
+          error: extractErrorMessage(err),
+          txHash,
+        };
       } finally {
         lockRef.current = false;
       }

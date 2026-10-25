@@ -34,20 +34,49 @@ export function stripErrorPrefix(message: string): string {
     .trim();
 }
 
+const REJECTED_RE = /user rejected|user denied|rejected the request/i;
+
+/**
+ * Best-effort message extraction from nested error shapes (viem, fetch,
+ * JSON-RPC `{error:{message}}`, contract receipts, `cause` chains).
+ * Returns null when nothing readable is found.
+ */
+function messageFrom(err: unknown, depth = 0): string | null {
+  if (err == null || depth > 4) return null;
+  if (typeof err === "string") return err.trim() || null;
+  if (typeof err !== "object") return null;
+
+  const e = err as Record<string, unknown>;
+  for (const key of ["shortMessage", "message", "details", "error", "cause", "data", "inner", "originalError"]) {
+    const value = e[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (value != null && typeof value === "object") {
+      const nested = messageFrom(value, depth + 1);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+function fallbackText(err: unknown): string {
+  if (typeof err !== "object" || err === null) return String(err);
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== "{}") return json;
+  } catch {
+    // circular / non-serializable — fall through
+  }
+  return "";
+}
+
 export function extractErrorMessage(err: unknown): string {
   if (err == null) return "Unknown error";
-  if (typeof err === "string") return stripErrorPrefix(err);
-  if (err instanceof Error) {
-    const anyErr = err as Error & {
-      shortMessage?: string;
-      details?: string;
-      message?: string;
-    };
-    const raw = anyErr.shortMessage || anyErr.details || anyErr.message || err.message;
-    if (/user rejected|user denied|rejected the request/i.test(raw)) {
-      return "Transaction rejected in wallet.";
-    }
-    return stripErrorPrefix(raw);
-  }
-  return stripErrorPrefix(String(err));
+  const raw = messageFrom(err) ?? fallbackText(err);
+  if (!raw || raw === "[object Object]" || raw === "{}") return "Unknown error";
+  if (REJECTED_RE.test(raw)) return "Transaction rejected in wallet.";
+  // "execution reverted: [EXPECTED] …" (viem) → drop the wrapper, keep the tag
+  const tagged = raw.match(
+    /^(?:execution reverted|reverted|contract call|vm execution|vm error)[:\s]+(\[[A-Z_]+\]\s*.+)$/i,
+  );
+  return stripErrorPrefix(tagged ? tagged[1] : raw);
 }

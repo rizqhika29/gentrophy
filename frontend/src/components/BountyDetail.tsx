@@ -17,17 +17,15 @@ import {
   Label,
   Skeleton,
 } from "@/components/ui/primitives";
-import { ConsensusPanel, ScoreBar } from "@/components/Consensus";
+import { ScoreBar } from "@/components/Consensus";
+import { TxProgress } from "@/components/TxProgress";
 import { useBounty, useTxRunner } from "@/hooks/useContract";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/components/ui/toast";
+import { submitWorkBlock } from "@/lib/rules";
 import { cn, formatGen, shortAddress } from "@/lib/utils";
 import { CONTRACT_ADDRESS } from "@/lib/config";
-import type {
-  Bounty,
-  BountyStatus,
-  ConsensusSummary,
-} from "@/lib/types";
+import type { Bounty, BountyStatus } from "@/lib/types";
 
 const STATUS_TONE: Record<BountyStatus, string> = {
   open: "border-primary/50 bg-primary/10 text-primary",
@@ -72,14 +70,9 @@ export function BountyDetail({
 }) {
   const { address, wrongNetwork } = useWallet();
   const { bounty, loading, error, refresh } = useBounty(bountyId);
-  const { run, busy } = useTxRunner();
+  const { run, progress, busy } = useTxRunner();
   const toast = useToast();
   const [workUrl, setWorkUrl] = useState("");
-  const [lastConsensus, setLastConsensus] = useState<{
-    consensus: ConsensusSummary | null | undefined;
-    statusLine?: string;
-    txHash?: string;
-  } | null>(null);
 
   const isPoster =
     address != null && bounty != null && bounty.poster.toLowerCase() === address.toLowerCase();
@@ -88,7 +81,14 @@ export function BountyDetail({
 
   const urlValid = isValidHttpsUrl(workUrl.trim());
 
-  const canSubmit = bounty?.status === "open";
+  // null = form available. Contract has no clock (GenVM has no timestamp
+  // primitive), so the poster/expiry rules are enforced here — which is what
+  // the FAQ ("the interface blocks late submissions") promises.
+  const submitBlock = bounty ? submitWorkBlock(bounty, address) : "closed";
+  const expired = submitBlock === "expired";
+  const posterNote = submitBlock === "poster";
+
+  const canSubmit = submitBlock === null;
   const canReview = bounty?.status === "submitted";
   const canCancel = bounty?.status === "open" && isPoster;
   const canReclaim = bounty?.status === "failed" && isPoster;
@@ -117,12 +117,7 @@ export function BountyDetail({
         void refresh();
       },
     });
-    if (result?.ok) {
-      setLastConsensus({
-        consensus: result.consensus,
-        statusLine: result.statusLine,
-        txHash: result.txHash,
-      });
+    if (result.ok) {
       toast.update(toastId, {
         kind: "success",
         title: successTitle,
@@ -136,20 +131,21 @@ export function BountyDetail({
       // refresh shortly after decision so score/status appear
       window.setTimeout(() => void refresh(), 1500);
     } else {
+      // Post-submit failures carry the on-chain reason; TxProgress renders it
+      // (progress.consensus) with the receipt + explorer link.
       toast.update(toastId, {
         kind: "error",
         title: `${functionName} failed`,
-        description: result && "error" in result ? result.error : "Unknown error",
+        description: result.error,
       });
-      if (result && "phase" in result && result.phase === "pre-submit") {
-        // safe — nothing on chain
-      }
     }
   };
 
   const onSubmitWork = (e: FormEvent) => {
     e.preventDefault();
     if (busy || !urlValid || !bounty) return;
+    const block = submitWorkBlock(bounty, address);
+    if (block) return;
     void submitTx("submit_work", [BigInt(bounty.bounty_id), workUrl.trim()], "Work submitted");
   };
 
@@ -223,6 +219,7 @@ export function BountyDetail({
 
         <p className="text-xs text-muted-foreground">
           deadline: {deadlineLabel(bounty.deadline)} — enforced off-chain by UI
+          {expired ? " (passed: submissions are blocked)" : ""}
         </p>
 
         {bounty.work_url ? (
@@ -239,6 +236,18 @@ export function BountyDetail({
               {bounty.work_url} <ExternalLink className="h-3 w-3 shrink-0" />
             </a>
           </div>
+        ) : null}
+
+        {posterNote ? (
+          <p className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+            This is your bounty — you cannot submit work to it.
+          </p>
+        ) : null}
+
+        {expired && bounty.status === "open" ? (
+          <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-300">
+            Deadline has passed — the UI blocks late submissions for this bounty.
+          </p>
         ) : null}
 
         {canSubmit ? (
@@ -351,13 +360,9 @@ export function BountyDetail({
           </p>
         ) : null}
 
-        {lastConsensus ? (
-          <ConsensusPanel
-            consensus={lastConsensus.consensus}
-            statusLine={lastConsensus.statusLine}
-            txHash={lastConsensus.txHash}
-          />
-        ) : null}
+        {/* decision, receipt, explorer link and consensus (success or failure)
+            all come from the runner's progress — a single source of truth */}
+        <TxProgress progress={progress} />
       </CardContent>
     </Card>
   );

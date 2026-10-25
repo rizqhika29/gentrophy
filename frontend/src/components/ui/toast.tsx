@@ -48,9 +48,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return id;
   }, [dismiss]);
 
-  const update = useCallback((id: number, patch: Partial<Omit<ToastItem, "id">>) => {
-    setItems((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-  }, []);
+  const update = useCallback(
+    (id: number, patch: Partial<Omit<ToastItem, "id">>) => {
+      setItems((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+      );
+      // A pending toast (pushed by the tx flows) only ever becomes success/error
+      // through update() — schedule its dismissal here, otherwise it lingers
+      // until the user dismisses it by hand and the stack fills up.
+      if (patch.kind && patch.kind !== "pending") {
+        window.setTimeout(() => dismiss(id), 6000);
+      }
+    },
+    [dismiss],
+  );
 
   const api = useMemo<ToastApi>(
     () => ({
